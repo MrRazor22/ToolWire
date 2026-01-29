@@ -1,3 +1,9 @@
 <Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+  </Folder>
+  <Project Path="ToolWire.Examples/ToolWire.Examples.csproj" Id="fc4214c9-397d-4280-8970-cb23b9b75b97" />
+  <Project Path="ToolWire.Providers.Google/ToolWire.Providers.Google.csproj" Id="df1560e1-a9b8-4f5e-92f4-fe1e0dfbc026" />
+  <Project Path="ToolWire.Providers.OpenAI/ToolWire.Providers.OpenAI.csproj" Id="69e720a0-36b1-4e5c-ab5c-e5e6e73b858f" />
   <Project Path="ToolWire/ToolWire.csproj" />
 </Solution>

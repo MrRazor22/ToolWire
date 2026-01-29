@@ -3,7 +3,7 @@ using Newtonsoft.Json.Linq;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace AgentCore.Utils
+namespace ToolWire.Utils
 {
     public static class Helpers
     {

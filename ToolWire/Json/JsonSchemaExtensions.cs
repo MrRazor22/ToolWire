@@ -1,188 +1,211 @@
-﻿using Newtonsoft.Json.Linq;
-using System;
+using Newtonsoft.Json.Linq;
 using System.Collections;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
-using System.Linq;
 using System.Reflection;
 
-namespace AgentCore.Json
+namespace ToolWire.Json
 {
-    public sealed class SchemaValidationError
-    {
-        public string Param { get; }
-        public string? Path { get; }
-        public string Message { get; }
-        public string ErrorType { get; }
+    public sealed record SchemaValidationError(
+        string Param,
+        string? Path,
+        string Message,
+        string ErrorType
+    );
 
-        public SchemaValidationError(string param, string? path, string message, string errorType)
-        {
-            Param = param;
-            Path = path;
-            Message = message;
-            ErrorType = errorType;
-        }
-    }
     public static class JsonSchemaExtensions
     {
-        public static JObject GetSchemaFor<T>() => typeof(T).GetSchemaForType();
+        private static readonly ConcurrentDictionary<Type, JObject> _schemaCache = new();
 
-        public static JObject GetSchemaForType(this Type type, HashSet<Type>? visited = null)
+        public static JObject GetSchemaFor<T>() =>
+            typeof(T).GetSchemaForType();
+
+        public static JObject GetSchemaForType(this Type type)
         {
-            visited ??= new HashSet<Type>();
             type = Nullable.GetUnderlyingType(type) ?? type;
 
+            var cached = _schemaCache.GetOrAdd(
+                type,
+                t => BuildSchema(t, new HashSet<Type>())
+            );
+
+            return (JObject)cached.DeepClone();
+        }
+
+        // ================= BUILD =================
+
+        private static JObject BuildSchema(Type type, HashSet<Type> visited)
+        {
+            // ---- enum ----
             if (type.IsEnum)
             {
-                var typeDesc = type.GetCustomAttribute<DescriptionAttribute>()?.Description;
+                var names = Enum.GetNames(type);
 
                 return new JsonSchemaBuilder()
-                    .Type<string>()
-                    .Enum(Enum.GetNames(type))
-                    .Description(typeDesc ?? $"One of: {string.Join(", ", Enum.GetNames(type))}")
+                    .Type("string")
+                    .Enum(names)
+                    .Description(
+                        type.GetCustomAttribute<DescriptionAttribute>()?.Description
+                        ?? $"One of: {string.Join(", ", names)}")
                     .Build();
             }
 
+            // ---- simple ----
             if (type.IsSimpleType())
-                return new JsonSchemaBuilder()
-                    .Type(type.MapClrTypeToJsonType())
-                    .Build();
+            {
+                var builder = new JsonSchemaBuilder()
+                    .Type(type.MapClrTypeToJsonType());
 
+                if (type == typeof(DateTime))
+                    builder.Format("date-time");
+
+                return builder.Build();
+            }
+
+            // ---- array ----
             if (type.IsArray)
+            {
                 return new JsonSchemaBuilder()
-                    .Type<Array>()
-                    .Items(type.GetElementType()!.GetSchemaForType(visited))
+                    .Type("array")
+                    .Items(type.GetElementType()!.GetSchemaForType())
                     .Build();
+            }
 
-            if (typeof(IEnumerable).IsAssignableFrom(type) && type.IsGenericType)
+            // ---- IEnumerable<T> ----
+            if (typeof(IEnumerable).IsAssignableFrom(type) &&
+                type.IsGenericType &&
+                type != typeof(string))
+            {
                 return new JsonSchemaBuilder()
-                    .Type<Array>()
-                    .Items(type.GetGenericArguments()[0].GetSchemaForType(visited))
+                    .Type("array")
+                    .Items(type.GetGenericArguments()[0].GetSchemaForType())
                     .Build();
+            }
 
-            if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Dictionary<,>) &&
+            // ---- Dictionary<string,T> ----
+            if (type.IsGenericType &&
+                type.GetGenericTypeDefinition() == typeof(Dictionary<,>) &&
                 type.GetGenericArguments()[0] == typeof(string))
             {
-                return GetDictionarySchema(type.GetGenericArguments()[1], visited);
-            }
-
-            if (visited.Contains(type))
-            {
-                // break recursion loops
                 return new JsonSchemaBuilder()
-                    .Type<object>()
+                    .Type("object")
+                    .AdditionalProperties(
+                        type.GetGenericArguments()[1].GetSchemaForType())
                     .Build();
             }
 
-            visited.Add(type);
+            // ---- recursion guard ----
+            if (!visited.Add(type))
+            {
+                return new JsonSchemaBuilder()
+                    .Type("object")
+                    .Build();
+            }
 
             var props = new JObject();
             var required = new JArray();
 
-            foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            foreach (var prop in type.GetProperties(
+                BindingFlags.Public | BindingFlags.Instance))
             {
-                if (prop.GetCustomAttribute<System.Text.Json.Serialization.JsonIgnoreAttribute>() != null)
+                if (prop.GetCustomAttribute<
+                    System.Text.Json.Serialization.JsonIgnoreAttribute>() != null)
                     continue;
 
-                var propType = Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType;
-                var propSchema = propType.GetSchemaForType(visited);
+                var propType =
+                    Nullable.GetUnderlyingType(prop.PropertyType)
+                    ?? prop.PropertyType;
+
+                var builder = new JsonSchemaBuilder(
+                    propType.GetSchemaForType());
 
                 // description
-                if (prop.GetCustomAttribute<DescriptionAttribute>() is { } descAttr &&
-                    !string.IsNullOrEmpty(descAttr.Description))
+                if (prop.GetCustomAttribute<DescriptionAttribute>() is { } desc &&
+                    !string.IsNullOrWhiteSpace(desc.Description))
                 {
-                    propSchema[JsonSchemaConstants.DescriptionKey] = descAttr.Description;
+                    builder.Description(desc.Description);
                 }
 
                 // email
                 if (prop.GetCustomAttribute<EmailAddressAttribute>() != null)
-                    propSchema[JsonSchemaConstants.FormatKey] = "email";
+                    builder.Format("email");
 
-                // length
+                // string length
                 if (prop.GetCustomAttribute<StringLengthAttribute>() is { } len)
                 {
-                    propSchema[JsonSchemaConstants.MinLengthKey] = len.MinimumLength;
-                    propSchema[JsonSchemaConstants.MaxLengthKey] = len.MaximumLength;
+                    if (len.MinimumLength > 0)
+                        builder.MinLength(len.MinimumLength);
+
+                    if (len.MaximumLength > 0)
+                        builder.MaxLength(len.MaximumLength);
                 }
 
                 // regex
-                if (prop.GetCustomAttribute<RegularExpressionAttribute>() is { } regex)
-                    propSchema[JsonSchemaConstants.PatternKey] = regex.Pattern;
+                if (prop.GetCustomAttribute<RegularExpressionAttribute>() is { } rx)
+                    builder.Pattern(rx.Pattern);
 
-                // range
+                // numeric range
                 if (prop.GetCustomAttribute<RangeAttribute>() is { } range)
                 {
-                    if (range.Minimum != null && double.TryParse(range.Minimum.ToString(), out var min))
-                        propSchema[JsonSchemaConstants.MinimumKey] = min;
-                    if (range.Maximum != null && double.TryParse(range.Maximum.ToString(), out var max))
-                        propSchema[JsonSchemaConstants.MaximumKey] = max;
+                    if (TryToDouble(range.Minimum, out var min))
+                        builder.Minimum(min);
+
+                    if (TryToDouble(range.Maximum, out var max))
+                        builder.Maximum(max);
                 }
 
-                // default
-                if (prop.GetCustomAttribute<DefaultValueAttribute>() is { } dv)
-                    propSchema[JsonSchemaConstants.DefaultKey] = JToken.FromObject(dv.Value);
+                props[prop.Name] = builder.Build();
 
-                props[prop.Name] = propSchema;
-
-                if (!prop.IsOptional())
+                if (prop.GetCustomAttribute<RequiredAttribute>() != null ||
+                    !prop.IsOptional())
+                {
                     required.Add(prop.Name);
+                }
             }
 
             return new JsonSchemaBuilder()
-                .Type<object>()
+                .Type("object")
                 .Properties(props)
                 .Required(required)
                 .AdditionalProperties(false)
                 .Build();
         }
 
-        private static JObject GetDictionarySchema(Type valueType, HashSet<Type> visited)
-        {
-            var valueSchema = valueType.GetSchemaForType(visited);
-            return new JsonSchemaBuilder()
-                .Type("object")
-                .AdditionalProperties(valueSchema)
-                .Build();
-        }
+        // ================= OPTIONAL =================
 
         private static bool IsOptional(this PropertyInfo prop)
         {
-            if (Nullable.GetUnderlyingType(prop.PropertyType) != null) return true;
-            if (prop.GetCustomAttribute<DefaultValueAttribute>() != null) return true;
-            if (IsNullableReference(prop)) return true;
-            return false;
+            if (Nullable.GetUnderlyingType(prop.PropertyType) != null)
+                return true;
+
+            return IsNullableReference(prop);
         }
 
         private static bool IsNullableReference(PropertyInfo prop)
         {
-            var nullAttr = prop.GetCustomAttributes().FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
-            if (nullAttr != null)
-            {
-                var flags = nullAttr.GetType().GetField("NullableFlags", BindingFlags.Public | BindingFlags.Instance);
-                var val = flags?.GetValue(nullAttr);
-                if (val is byte b) return b == 2;
-                if (val is byte[] arr && arr.Length > 0) return arr[0] == 2;
-            }
+            var attr = prop.CustomAttributes
+                .FirstOrDefault(a => a.AttributeType.Name == "NullableAttribute");
 
-            var ctxAttr = prop.DeclaringType?.GetCustomAttributes().FirstOrDefault(a => a.GetType().Name == "NullableContextAttribute");
-            if (ctxAttr != null)
+            if (attr?.ConstructorArguments.Count > 0)
             {
-                var flagField = ctxAttr.GetType().GetField("Flag", BindingFlags.Public | BindingFlags.Instance);
-                var f = flagField?.GetValue(ctxAttr);
-                if (f is byte fb) return fb == 2;
-            }
+                var arg = attr.ConstructorArguments[0];
 
-            var asmCtx = prop.Module.Assembly.GetCustomAttributes().FirstOrDefault(a => a.GetType().Name == "NullableContextAttribute");
-            if (asmCtx != null)
-            {
-                var flagField = asmCtx.GetType().GetField("Flag", BindingFlags.Public | BindingFlags.Instance);
-                var f = flagField?.GetValue(asmCtx);
-                if (f is byte fb) return fb == 2;
+                if (arg.Value is byte b)
+                    return b == 2;
+
+                if (arg.Value is IReadOnlyCollection<CustomAttributeTypedArgument> arr &&
+                    arr.Count > 0 &&
+                    arr.First().Value is byte bb)
+                {
+                    return bb == 2;
+                }
             }
 
             return false;
         }
+
+        // ================= TYPE HELPERS =================
 
         public static bool IsSimpleType(this Type type) =>
             type.IsPrimitive ||
@@ -193,19 +216,43 @@ namespace AgentCore.Json
 
         public static string MapClrTypeToJsonType(this Type type)
         {
-            if (type == null) throw new ArgumentNullException(nameof(type));
-            if (Nullable.GetUnderlyingType(type) is Type underlyingType) type = underlyingType;
+            if (Nullable.GetUnderlyingType(type) is Type u)
+                type = u;
+
             if (type.IsEnum) return "string";
             if (type == typeof(string) || type == typeof(char)) return "string";
             if (type == typeof(bool)) return "boolean";
-            if (type == typeof(float) || type == typeof(double) || type == typeof(decimal)) return "number";
-            if (type == typeof(void) || type == typeof(DBNull)) return "null";
-            if (type.IsArray || typeof(IEnumerable).IsAssignableFrom(type) && type != typeof(string)) return "array";
-            if (type == typeof(int) || type == typeof(long) || type == typeof(short) || type == typeof(byte) ||
-                type == typeof(uint) || type == typeof(ulong) || type == typeof(ushort) || type == typeof(sbyte))
-                return "integer";
+            if (type == typeof(float) ||
+                type == typeof(double) ||
+                type == typeof(decimal)) return "number";
+            if (type.IsIntegerType()) return "integer";
+            if (type.IsArray ||
+                (typeof(IEnumerable).IsAssignableFrom(type) &&
+                 type != typeof(string)))
+                return "array";
+
             return "object";
         }
+
+        private static bool IsIntegerType(this Type t) =>
+            t == typeof(int) || t == typeof(long) ||
+            t == typeof(short) || t == typeof(byte) ||
+            t == typeof(uint) || t == typeof(ulong) ||
+            t == typeof(ushort) || t == typeof(sbyte);
+
+        private static bool TryToDouble(object? value, out double result)
+        {
+            if (value == null)
+            {
+                result = default;
+                return false;
+            }
+
+            return double.TryParse(value.ToString(), out result);
+        }
+
+        // ================= VALIDATION =================
+
         public static List<SchemaValidationError> Validate(
             this JObject schema,
             JToken? node,
@@ -214,88 +261,42 @@ namespace AgentCore.Json
             var errors = new List<SchemaValidationError>();
 
             if (node == null)
-            {
-                if (schema["required"] is JArray arr && arr.Count > 0)
-                    errors.Add(new SchemaValidationError(path, path, "Value required but missing.", "missing"));
                 return errors;
-            }
 
             var type = schema["type"]?.ToString();
+
             switch (type)
             {
-                case "string":
-                    if (node.Type != JTokenType.String)
-                        errors.Add(new SchemaValidationError(path, path, "Expected string", "type_error"));
+                case "string" when node.Type != JTokenType.String:
+                    errors.Add(new(path, path, "Expected string", "type"));
                     break;
 
-                case "integer":
-                    if (node.Type != JTokenType.Integer)
-                        errors.Add(new SchemaValidationError(path, path, "Expected integer", "type_error"));
+                case "integer" when node.Type != JTokenType.Integer:
+                    errors.Add(new(path, path, "Expected integer", "type"));
                     break;
 
-                case "number":
-                    if (node.Type != JTokenType.Float && node.Type != JTokenType.Integer)
-                        errors.Add(new SchemaValidationError(path, path, "Expected number", "type_error"));
+                case "number" when node.Type != JTokenType.Float &&
+                                   node.Type != JTokenType.Integer:
+                    errors.Add(new(path, path, "Expected number", "type"));
                     break;
 
-                case "boolean":
-                    if (node.Type != JTokenType.Boolean)
-                        errors.Add(new SchemaValidationError(path, path, "Expected boolean", "type_error"));
+                case "boolean" when node.Type != JTokenType.Boolean:
+                    errors.Add(new(path, path, "Expected boolean", "type"));
                     break;
 
-                case "array":
-                    if (node.Type != JTokenType.Array)
-                    {
-                        errors.Add(new SchemaValidationError(path, path, "Expected array", "type_error"));
-                    }
-                    else if (schema["items"] is JObject itemSchema)
-                    {
-                        var arrNode = (JArray)node;
-                        for (int i = 0; i < arrNode.Count; i++)
+                case "array" when node is JArray arr &&
+                                  schema["items"] is JObject itemSchema:
+                    for (int i = 0; i < arr.Count; i++)
+                        errors.AddRange(
+                            itemSchema.Validate(arr[i], $"{path}[{i}]"));
+                    break;
+
+                case "object" when node is JObject obj &&
+                                   schema["properties"] is JObject props:
+                    foreach (var kv in props)
+                        if (obj.TryGetValue(kv.Key, out var val) && kv.Value is JObject valueSchema)
                             errors.AddRange(
-                                itemSchema.Validate(arrNode[i], $"{path}[{i}]")
-                            );
-                    }
-                    break;
-
-                case "object":
-                    if (node.Type != JTokenType.Object)
-                    {
-                        errors.Add(new SchemaValidationError(path, path, "Expected object", "type_error"));
-                    }
-                    else if (schema["properties"] is JObject props)
-                    {
-                        var objNode = (JObject)node;
-
-                        foreach (var kvp in props)
-                        {
-                            var key = kvp.Key;
-                            var childSchema = (JObject)kvp.Value;
-
-                            if (!objNode.ContainsKey(key))
-                            {
-                                if (schema["required"] is JArray reqArr &&
-                                    reqArr.Any(r => r?.ToString() == key))
-                                {
-                                    errors.Add(new SchemaValidationError(
-                                        key,
-                                        $"{path}.{key}".Trim('.'),
-                                        $"Missing required field '{key}'",
-                                        "missing"
-                                    ));
-                                }
-                            }
-                            else
-                            {
-                                errors.AddRange(
-                                    childSchema.Validate(
-                                        objNode[key],
-                                        $"{path}.{key}".Trim('.')
-                                    )
-                                );
-                            }
-                        }
-                    }
+                                valueSchema.Validate(val, $"{path}.{kv.Key}".Trim('.')));
                     break;
             }
 
