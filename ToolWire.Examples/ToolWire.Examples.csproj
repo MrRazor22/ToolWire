@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -9,11 +9,14 @@
 
 	<ItemGroup>
 		<PackageReference Include="Google.GenAI" Version="0.14.0" />
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+		<PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
 		<PackageReference Include="OpenAI" Version="2.8.0" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<ProjectReference Include="..\ToolWire.Providers.Google\ToolWire.Providers.Google.csproj" />
+		<ProjectReference Include="..\ToolWire.Providers.Mcp\ToolWire.Providers.Mcp.csproj" />
 		<ProjectReference Include="..\ToolWire.Providers.OpenAI\ToolWire.Providers.OpenAI.csproj" />
 		<ProjectReference Include="..\ToolWire\ToolWire.csproj" />
 	</ItemGroup>

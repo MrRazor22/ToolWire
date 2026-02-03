@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    
+    <!-- NuGet Package Metadata -->
+    <PackageId>ToolWire.Providers.Mcp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>ToolWire Contributors</Authors>
+    <Company>ToolWire</Company>
+    <Product>ToolWire</Product>
+    <Description>MCP (Model Context Protocol) provider for ToolWire. Expose ToolWire tools as MCP server tools for cross-language and cross-process AI tool integration.</Description>
+    <Summary>MCP provider for ToolWire - bridge to the MCP ecosystem</Summary>
+    <PackageTags>ai;agent;tools;llm;mcp;model-context-protocol;server;function-calling;tool-calling;dotnet</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/MrRazor22/toolwire</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MrRazor22/toolwire</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <Copyright>Copyright (c) 2025 ToolWire Contributors</Copyright>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="0.7.0-preview.1" />
+    <PackageReference Include="System.Text.Json" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ToolWire\ToolWire.csproj" />
+  </ItemGroup>
+
+</Project>
